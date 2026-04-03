@@ -1,56 +1,109 @@
 import csv
 import os
-import re
-from turtle import st
-import scrython
-import scrython.cards
 import sys
+import time
+import scrython.cards
 
-if (sys.argv.__len__() < 2):
-    print("Usage: python manaboxCSV.py <path to txt file>")
+if len(sys.argv) < 2 or len(sys.argv) > 3:
+    print("Usage: python manaboxCSV.py <path to txt file> [output.csv]")
     sys.exit(1)
-    
-if os.path.exists("output.csv"):
-    print("Output file 'output.csv' already exists. Remove output.csv? [y,N]")
+
+input_path = sys.argv[1]
+output_path = sys.argv[2] if len(sys.argv) >= 3 else "output.csv"
+
+# conservative rate limiter: 0.5 seconds between requests (~2 req/sec)
+REQUEST_DELAY = 0.5
+RATE_LIMIT_WAIT = 60
+MAX_RETRIES = 3
+
+if not os.path.exists(input_path):
+    print(f"Input file not found: {input_path}")
+    sys.exit(1)
+
+if os.path.exists(output_path):
+    print(f"Output file '{output_path}' already exists. Remove it? [y/N]")
     if input().strip().lower() == 'y':
-        os.remove("output.csv")
+        os.remove(output_path)
     else:
         sys.exit(0)
 
-f = open(sys.argv[1], 'r')
 res = []
-lines = 0
 cards = 0
 
-for line in f:
-    if line.strip() == "" or line.startswith("[") or line.startswith("//"):
-        continue 
+def fetch_card(name, setcode, collector_id):
+    query = f'!"{name}" set:{setcode} number:{collector_id}'
 
-    quant = line[0 : line.find(' ')]
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            time.sleep(REQUEST_DELAY)
+            return scrython.cards.Search(q=query).data()[0]
 
-    n = line[line.find(' ') + 1 : line.find('(')-1]
-    setcode = line[line.find('(') + 1 : line.find(')')]
-    collectorID = line[line.find(')') + 2 : line.find(' ', line.find(')') + 2)]
-    foil = line.strip().endswith("*F*")
+        except Exception as e:
+            msg = str(e).lower()
 
-    try:
-        card = scrython.cards.Search(q=f'!"{n}" set:{setcode} number:{collectorID}').data()[0]
-    except Exception as e:
-        print(f"Error fetching card: {n} from set {setcode} with collector ID {collectorID}")
-        print(e)
-        continue
+            if "rate" in msg or "429" in msg:
+                if attempt < MAX_RETRIES:
+                    print(f"\nRate limited. Waiting {RATE_LIMIT_WAIT}s before retry {attempt + 1}/{MAX_RETRIES}...")
+                    time.sleep(RATE_LIMIT_WAIT)
+                    continue
 
-    res.append([card["name"], card["set"], card["set_name"], card["collector_number"], "foil" if foil else "normal", card["rarity"], quant, "", card["id"], "0", "false", "false", "near_mint", "en", "USD"])
-    cards += int(quant)
-    print("\x1b[2K", end='')
-    print(f"Processed {cards} cards. {card["name"]}", end='\r')
+            raise
 
-if os.path.exists("output.csv"):
-    os.remove("output.csv")
+with open(input_path, 'r') as f:
+    for line in f:
+        if line.strip() == "" or line.startswith("[") or line.startswith("//"):
+            continue
 
-with open("output.csv", mode="x") as file:
+        quant = line[0:line.find(' ')]
+        n = line[line.find(' ') + 1: line.find('(') - 1]
+        setcode = line[line.find('(') + 1: line.find(')')]
+        collectorID = line[line.find(')') + 2: line.find(' ', line.find(')') + 2)]
+        foil = line.strip().endswith("*F*")
+
+        try:
+            card = fetch_card(n, setcode, collectorID)
+        except Exception as e:
+            print(f"\nError fetching card: {n} ({setcode} #{collectorID})")
+            print(e)
+            continue
+        
+        price = ""
+        if foil:
+            price = card["prices"].get("usd_foil") or card["prices"].get("usd") or ""
+        else:
+            price = card["prices"].get("usd") or ""
+    
+            res.append([
+                card["name"],
+                card["set"],
+                card["set_name"],
+                card["collector_number"],
+                "foil" if foil else "normal",
+                card["rarity"],
+                quant,
+                "",
+                card["id"],
+                price,
+                "false",
+                "false",
+                "near_mint",
+                "en",
+                "USD"
+            ])
+           
+        cards += int(quant)
+        print("\x1b[2K", end="")
+        print(f"Processed {cards} cards. {card['name']}", end="\r")
+
+with open(output_path, mode="w", newline="", encoding="utf-8") as file:
     writer = csv.writer(file)
-    writer.writerow(["Name", "Set code", "Set name", "Collector number", "Foil", "Rarity", "Quantity", "ManaBox ID", "Scryfall ID", "Purchase price", "Misprint", "Altered", "Condition", "Language", "Purchase price currency"])
+    writer.writerow([
+        "Name", "Set code", "Set name", "Collector number", "Foil",
+        "Rarity", "Quantity", "ManaBox ID", "Scryfall ID",
+        "Purchase price", "Misprint", "Altered", "Condition",
+        "Language", "Purchase price currency"
+    ])
     writer.writerows(res)
 
-print(f"Successfully processed {cards} cards, output written to {os.path.abspath('output.csv')}")
+print(f"\nSuccessfully processed {cards} cards.")
+print(f"Output written to {os.path.abspath(output_path)}")
